@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wayanad Multi-Hazard Relocation Platform</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+        #map { width: 100vw; height: 100vh; z-index: 1; }
+        .dashboard-panel {
+            position: absolute; top: 15px; right: 15px; z-index: 1000;
+            background: rgba(255, 255, 255, 0.96); backdrop-filter: blur(8px);
+            padding: 16px 20px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            width: 320px; font-size: 13px;
+        }
+        .dashboard-panel h2 { margin: 0 0 2px 0; font-size: 16px; color: #0f172a; font-weight: 700; }
+        .dashboard-panel p.sub { margin: 0 0 10px 0; font-size: 11px; color: #64748b; }
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+        .stat-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px 10px; }
+        .stat-box .val { font-size: 16px; font-weight: bold; color: #0f172a; }
+        .stat-box .label { font-size: 11px; color: #64748b; }
+        .control-group { margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+        .control-group label { display: flex; justify-content: space-between; font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+        input[type=range] { width: 100%; margin-bottom: 8px; }
+        button { width: 100%; background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #1d4ed8; }
+        .legend { margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 8px; font-size: 11px; }
+        .legend-row { display: flex; align-items: center; margin-bottom: 4px; }
+        .legend-color { width: 12px; height: 12px; margin-right: 8px; border-radius: 2px; }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="dashboard-panel">
+    <h2>Relocation Intelligence</h2>
+    <p class="sub">Study Region: Wayanad, Kerala</p>
+    
+    <div class="stat-grid">
+        <div class="stat-box"><div class="val" id="pop-risk">...</div><div class="label">Displaced Pop</div></div>
+        <div class="stat-box"><div class="val" id="safe-cap">...</div><div class="label">Safe Capacity</div></div>
+        <div class="stat-box"><div class="val" id="red-zones">...</div><div class="label">Critical Cells</div></div>
+        <div class="stat-box"><div class="val" id="safe-sites">...</div><div class="label">Safe Sites</div></div>
+    </div>
+
+    <div class="control-group">
+        <label>Monsoon Rainfall Surge: <span id="rain-val">Normal (1.0x)</span></label>
+        <input type="range" id="rain-slider" min="1.0" max="2.0" step="0.1" value="1.0">
+        <button id="sim-btn" onclick="triggerSimulation()">Simulate Hazard Surge</button>
+    </div>
+
+    <div class="legend">
+        <b>Risk Classification</b>
+        <div class="legend-row"><div class="legend-color" style="background:#dc2626;"></div> Critical Risk (Score ≥ 80)</div>
+        <div class="legend-row"><div class="legend-color" style="background:#ea580c;"></div> High Risk (60–80)</div>
+        <div class="legend-row"><div class="legend-color" style="background:#f59e0b;"></div> Moderate Risk (40–60)</div>
+        <div class="legend-row"><div class="legend-color" style="background:#84cc16;"></div> Low Risk (&lt; 40)</div>
+        <div class="legend-row"><div class="legend-color" style="background:#10b981;"></div> Safe Suitability Candidate</div>
+        <div class="legend-row"><div class="legend-color" style="background:#2563eb; height: 3px;"></div> Relocation Vectors</div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map('map').setView([11.70, 76.08], 11);
+    
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const API_BASE = "http://127.0.0.1:8000/api";
+    
+    // Dedicated LayerGroups for live-updating
+    const riskLayerGroup = L.layerGroup().addTo(map);
+    const flowsLayerGroup = L.layerGroup().addTo(map);
+
+    function getRiskColor(score) {
+        if (score >= 80) return '#dc2626';
+        if (score >= 60) return '#ea580c';
+        if (score >= 40) return '#f59e0b';
+        if (score >= 20) return '#eab308';
+        return '#84cc16';
+    }
+
+    function renderRiskGrid(geojsonData) {
+        riskLayerGroup.clearLayers();
+        L.geoJSON(geojsonData, {
+            style: f => ({
+                fillColor: getRiskColor(f.properties.risk_score),
+                weight: 1, opacity: 0.6, color: '#ffffff', fillOpacity: 0.55
+            }),
+            onEachFeature: (f, l) => {
+                const p = f.properties;
+                l.bindPopup(`
+                    <b>Cell ID:</b> ${p.cell_id}<br/>
+                    <b>Risk Score:</b> ${p.risk_score} (${p.risk_category})<br/>
+                    <b>Hazard Score:</b> ${p.hazard_score}<br/>
+                    <b>Population:</b> ${p.population}<br/>
+                    <b>Action:</b> ${p.relocation_priority}
+                `);
+            }
+        }).addTo(riskLayerGroup);
+    }
+
+    function renderFlowVectors(geojsonData) {
+        flowsLayerGroup.clearLayers();
+        L.geoJSON(geojsonData, {
+            style: { color: '#2563eb', weight: 2.5, opacity: 0.85, dashArray: '5, 5' },
+            onEachFeature: (f, l) => {
+                const p = f.properties;
+                l.bindPopup(`<b>Relocation Corridor</b><br/>${p.from_cell} &rarr; ${p.to_site}<br/>Evacuated Pop: ${p.people_moved}<br/>Distance: ${p.distance_km} km`);
+            }
+        }).addTo(flowsLayerGroup);
+    }
+
+    // Initial base state
+    fetch(`${API_BASE}/summary`).then(r => r.json()).then(data => {
+        document.getElementById('pop-risk').innerText = data.population_at_critical_risk.toLocaleString();
+        document.getElementById('safe-cap').innerText = data.total_safe_capacity.toLocaleString();
+        document.getElementById('red-zones').innerText = data.critical_red_zones;
+        document.getElementById('safe-sites').innerText = data.candidate_safe_sites;
+    });
+
+    fetch(`${API_BASE}/layers/risk`).then(r => r.json()).then(renderRiskGrid);
+    fetch(`${API_BASE}/layers/relocation-flows`).then(r => r.json()).then(renderFlowVectors);
+
+    fetch(`${API_BASE}/layers/safe-sites`).then(r => r.json()).then(data => {
+        L.geoJSON(data, {
+            style: { fillColor: '#10b981', weight: 2, color: '#047857', fillOpacity: 0.65 },
+            onEachFeature: (f, l) => {
+                const p = f.properties;
+                l.bindPopup(`<b>${p.site_id}</b><br/>Suitability: ${p.suitability_score}/100<br/>Carrying Cap: ${p.carrying_capacity} persons`);
+            }
+        }).addTo(map);
+    });
+
+    const rainSlider = document.getElementById('rain-slider');
+    rainSlider.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        document.getElementById('rain-val').innerText = `${val.toFixed(1)}x`;
+    });
+
+    function triggerSimulation() {
+        const mult = parseFloat(rainSlider.value);
+        const btn = document.getElementById('sim-btn');
+        btn.innerText = "Re-solving Optimization...";
+        btn.disabled = true;
+
+        fetch(`${API_BASE}/simulate`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ rain_multiplier: mult, hazard_weight: 0.50, capacity_buffer: 1.0 })
+        })
+        .then(r => r.json())
+        .then(res => {
+            btn.innerText = "Simulate Hazard Surge";
+            btn.disabled = false;
+            
+            document.getElementById('red-zones').innerText = res.critical_cells;
+            document.getElementById('pop-risk').innerText = res.newly_displaced_population.toLocaleString();
+            
+            // Simultaneously recolor cells AND redraw re-optimized flow corridors
+            renderRiskGrid(res.risk_geojson);
+            renderFlowVectors(res.flows_geojson);
+        })
+        .catch(err => {
+            btn.innerText = "Simulate Hazard Surge";
+            btn.disabled = false;
+            console.error("Simulation failed:", err);
+        });
+    }
+</script>
+</body>
+</html>
