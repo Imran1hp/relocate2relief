@@ -201,7 +201,7 @@ def run_simulation(params: ScenarioParams):
     }
 @app.get("/", response_class=FileResponse)
 def serve_dashboard():
-    dashboard_path = os.path.join("frontend", "index.html")
+    dashboard_path = os.path.join("frontend", "frontend/index.html")
     if not os.path.exists(dashboard_path):
         raise HTTPException(status_code=404, detail="Dashboard index.html not found.")
     return FileResponse(dashboard_path)
